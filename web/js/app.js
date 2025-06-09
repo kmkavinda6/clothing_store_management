@@ -3,11 +3,15 @@
 let currentUser = null;
 let styles = [];
 let racks = [];
+let trialInfo = null;
 
 // Initialize the application
 document.addEventListener('DOMContentLoaded', function() {
     checkLoginStatus();
     setupEventListeners();
+    
+    // Check trial status every 5 minutes
+    setInterval(checkTrialStatusPeriodically, 5 * 60 * 1000);
 });
 
 // Check if user is logged in
@@ -15,8 +19,21 @@ async function checkLoginStatus() {
     try {
         currentUser = await eel.get_current_user()();
         if (currentUser) {
+            // Get trial status for existing session
+            trialInfo = await eel.get_trial_status()();
+            
+            // Check if trial expired while user was logged in
+            if (!trialInfo.is_active && trialInfo.expired) {
+                showTrialExpiredModal({
+                    company: 'Liupe Technologies',
+                    email: 'hello@liupe.tech'
+                });
+                return;
+            }
+            
             showMainContent();
             updateUserInterface();
+            showTrialStatus();
             loadDashboardData();
         } else {
             showLoginModal();
@@ -62,11 +79,15 @@ async function handleLogin(event) {
         
         if (result.success) {
             currentUser = result.user;
+            trialInfo = result.trial_info;
             hideLoginModal();
             showMainContent();
             updateUserInterface();
+            showTrialStatus();
             loadDashboardData();
             showAlert('Login successful!', 'success');
+        } else if (result.trial_expired) {
+            showTrialExpiredModal(result.contact_info);
         } else {
             showAlert(result.message, 'danger');
         }
@@ -120,6 +141,51 @@ function updateUserInterface() {
         styleManagementTab.style.display = 'block';
     } else {
         styleManagementTab.style.display = 'none';
+    }
+}
+
+// Show trial expiration modal
+function showTrialExpiredModal(contactInfo) {
+    const modal = new bootstrap.Modal(document.getElementById('trialExpiredModal'));
+    modal.show();
+}
+
+// Show trial status in the UI
+function showTrialStatus() {
+    if (!trialInfo) return;
+    
+    if (trialInfo.is_active && trialInfo.days_remaining <= 7) {
+        // Show warning for last 7 days
+        const warningMessage = `Trial expires in ${trialInfo.days_remaining} day${trialInfo.days_remaining !== 1 ? 's' : ''}. Contact Liupe Technologies at hello@liupe.tech for full license.`;
+        showAlert(warningMessage, 'warning');
+        
+        // Add trial warning to navbar
+        const navbar = document.querySelector('.navbar .container-fluid');
+        const trialWarning = document.createElement('div');
+        trialWarning.className = 'navbar-text text-warning me-3';
+        trialWarning.innerHTML = `<i class="fas fa-exclamation-triangle"></i> Trial: ${trialInfo.days_remaining} days left`;
+        navbar.insertBefore(trialWarning, navbar.lastElementChild);
+    }
+}
+
+// Check trial status periodically
+async function checkTrialStatusPeriodically() {
+    if (!currentUser) return;
+    
+    try {
+        const status = await eel.get_trial_status()();
+        if (!status.is_active && status.expired) {
+            // Trial expired, show modal and logout
+            showTrialExpiredModal({
+                company: 'Liupe Technologies',
+                email: 'hello@liupe.tech'
+            });
+            setTimeout(() => {
+                logout();
+            }, 2000);
+        }
+    } catch (error) {
+        console.error('Error checking trial status:', error);
     }
 }
 
