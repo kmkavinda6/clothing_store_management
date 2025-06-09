@@ -7,16 +7,28 @@ Main application entry point using Python Eel
 import eel
 import sqlite3
 import os
+import sys
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import hashlib
 
-# Initialize Eel
-eel.init('web')
+# Handle executable environment
+def get_resource_path(relative_path):
+    """Get absolute path to resource, works for dev and for PyInstaller"""
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
-# Database setup
-DB_PATH = 'inventory.db'
+# Initialize Eel with proper path handling
+web_path = get_resource_path('web')
+eel.init(web_path)
+
+# Database setup - use current directory for database
+DB_PATH = os.path.join(os.getcwd(), 'inventory.db')
 
 class InventoryDatabase:
     def __init__(self):
@@ -127,6 +139,18 @@ class InventoryDatabase:
             )
         ''')
         
+        # Trial tracking table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS trial_info (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                first_login_date TEXT NOT NULL,
+                trial_start_date TEXT NOT NULL,
+                trial_end_date TEXT NOT NULL,
+                is_trial_active BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
         # Insert default admin user
         cursor.execute('''
             INSERT OR IGNORE INTO users (username, password_hash, role, email)
@@ -156,13 +180,75 @@ class InventoryDatabase:
 # Initialize database
 db = InventoryDatabase()
 
+# Trial management functions
+def init_trial_if_needed():
+    """Initialize trial period on first login"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT COUNT(*) FROM trial_info')
+    trial_exists = cursor.fetchone()[0] > 0
+    
+    if not trial_exists:
+        today = datetime.now()
+        trial_end = today + timedelta(days=30)
+        
+        cursor.execute('''
+            INSERT INTO trial_info (first_login_date, trial_start_date, trial_end_date, is_trial_active)
+            VALUES (?, ?, ?, ?)
+        ''', (today.isoformat(), today.isoformat(), trial_end.isoformat(), True))
+        conn.commit()
+    
+    conn.close()
+
+def check_trial_status():
+    """Check if trial period is still active"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT trial_end_date, is_trial_active FROM trial_info ORDER BY id DESC LIMIT 1')
+    result = cursor.fetchone()
+    conn.close()
+    
+    if not result:
+        return {'is_active': True, 'days_remaining': 30}
+    
+    trial_end_str, is_active = result
+    trial_end = datetime.fromisoformat(trial_end_str)
+    now = datetime.now()
+    
+    if now > trial_end:
+        # Trial expired
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('UPDATE trial_info SET is_trial_active = 0')
+        conn.commit()
+        conn.close()
+        return {'is_active': False, 'days_remaining': 0, 'expired': True}
+    
+    days_remaining = (trial_end - now).days
+    return {'is_active': True, 'days_remaining': days_remaining}
+
 # Session management
 current_user = None
 
 @eel.expose
 def login(username: str, password: str) -> Dict:
-    """User login function"""
+    """User login function with trial period check"""
     global current_user
+    
+    # First check trial status
+    trial_status = check_trial_status()
+    if not trial_status['is_active'] and trial_status.get('expired', False):
+        return {
+            'success': False, 
+            'message': 'Trial period expired', 
+            'trial_expired': True,
+            'contact_info': {
+                'company': 'Liupe Technologies',
+                'email': 'hello@liupe.tech'
+            }
+        }
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -177,13 +263,22 @@ def login(username: str, password: str) -> Dict:
     conn.close()
     
     if user:
+        # Initialize trial on first successful login
+        init_trial_if_needed()
+        
         current_user = {
             'id': user[0],
             'username': user[1],
             'role': user[2],
             'email': user[3]
         }
-        return {'success': True, 'user': current_user}
+        
+        # Include trial info in response
+        return {
+            'success': True, 
+            'user': current_user,
+            'trial_info': trial_status
+        }
     else:
         return {'success': False, 'message': 'Invalid credentials'}
 
@@ -198,6 +293,11 @@ def logout() -> Dict:
 def get_current_user() -> Optional[Dict]:
     """Get current logged in user"""
     return current_user
+
+@eel.expose
+def get_trial_status() -> Dict:
+    """Get current trial status"""
+    return check_trial_status()
 
 @eel.expose
 def get_styles() -> List[Dict]:
